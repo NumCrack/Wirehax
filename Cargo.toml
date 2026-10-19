@@ -1,0 +1,25 @@
+[package]
+name = "wirehax"
+version = "0.1.0"
+edition = "2024"
+description = "Standalone rescue DFU ROP bootloader tool for NumWorks N0120 calculators"
+authors = ["Bjarnos", "Andrei"]
+repository = "https://github.com/NumCrack/Wirehax"
+license = "GPL-3.0-or-later"
+readme = "README.md"
+keywords = ["numworks", "dfu", "stm32", "calculator", "bootloader"]
+categories = ["embedded", "command-line-utilities", "hardware-support"]
+
+[dependencies]
+anyhow = "1.0.104"
+rusb = { version = "0.9.4", features = ["vendored"] }
+sha2 = "0.11.0"
+
+[lints.clippy]
+uninlined_format_args = "warn"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

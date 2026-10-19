@@ -1,0 +1,13 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Rust build artifacts
+/target
+
+# Binaries and research
+firmware
+research
+uploads/
+examples/**/build/
+payloads/*.elf
