@@ -8,8 +8,8 @@
 >**Independent Project & Educational Use Only**  
 >WireHax is an independent open-source research project not affiliated with NumWorks SAS.
 >This repository contains **no proprietary NumWorks firmware or binaries**.
->WireHax is intended strictly for security research, hardware interoperability, and educational purposes.
->Do not use this tool to bypass examination locks or violate academic integrity policies.
+>WireHax is intended **only** for security research and hardware interoperability.
+>Wirehax is not intended to, and should not be used to violate academic integrity policies.
 >For full trademark notices, copyright policies, and liability disclaimers, please read [`LEGAL.md`](LEGAL.md).
 
 WireHax boots a modified NumWorks N0120 Slot B image through the rescue DFU interface.
