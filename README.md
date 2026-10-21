@@ -12,28 +12,7 @@
 >Do not use this tool to bypass examination locks or violate academic integrity policies.
 >For full trademark notices, copyright policies, and liability disclaimers, please read [`LEGAL.md`](LEGAL.md).
 
-WireHax boots a modified NumWorks N0120 Slot B image through the rescue-DFU
-ROP/RCE path using a single standalone executable.
-
-The boot is temporary: WireHax stages its ROP chain and chainloader in RAM,
-then branches to the external Slot B image. It does not replace the bootloader
-or write to internal flash.
-
----
-
-## Understanding the Architecture: Slot A vs. Slot B
-
-NumWorks N0120 calculators divide their storage into distinct regions:
-
-- **Internal Flash (`0x08000000`):** Contains the 512 KiB read-only bootloader.
-- **External QSPI Flash (`0x90000000`):** Divided into two operating system partitions:
-  - **Slot A (`0x90000000`):** The default slot containing the factory-installed, signed NumWorks Epsilon OS.
-  - **Slot B (`0x90400000`):** A secondary partition normally reserved for OS upgrades.
-
-### Why This Is Safe & Non-Destructive
-
-* **Slot A is left untouched:** WireHax only writes its payload to RAM and instructs the calculator to jump to Slot B (`0x90400020`). Your official, signed OS in Slot A remains intact.
-* **Non-persistent:** WireHax runs purely in volatile SRAM. If anything hangs or fails, simply press the rear **RESET** button without holding any keys. The calculator immediately reverts to running stock Epsilon from Slot A.
+WireHax boots a modified NumWorks N0120 Slot B image through the rescue DFU interface.
 
 ---
 
@@ -43,16 +22,7 @@ NumWorks N0120 calculators divide their storage into distinct regions:
 - Rust toolchain (1.85+ / 2024 edition) if building from source.
 - `dfu-util` (to flash your custom Slot B image).
 - USB access for device `0483:a291`.
-- A custom Slot B raw binary image linked for `0x90400000` *(Note: A ready-to-flash Slot B example/guide will be added later)*.
-
-### Install `dfu-util`
-
-`dfu-util` is required to write custom images to external flash Slot B:
-
-* **Linux (Debian/Ubuntu):** `sudo apt install dfu-util`
-* **Linux (Arch):** `sudo pacman -S dfu-util`
-* **macOS (Homebrew):** `brew install dfu-util`
-* **Windows:** Install via [Scoop](https://scoop.sh/) (`scoop install dfu-util`) or download the precompiled binary from [SourceForge](https://sourceforge.net/projects/dfu-util/files/).
+- A custom Slot B raw binary image linked for `0x90400000`.
 
 ### USB Setup & Drivers
 
@@ -72,45 +42,17 @@ On Windows, WireHax and `dfu-util` communicate with the STM32 DFU bootloader via
 4. Select `STM32 BOOTLOADER` (USB ID `0483:a291`).
 5. Select **WinUSB** as the driver and click **Replace Driver** (or **Install Driver**).
 
-## End-to-End Workflow
-
-Here is the complete order of operations from zero to booting a custom OS:
-
-```mermaid
-flowchart TD
-    A["Prepare Slot B Image (.bin linked for 0x90400000)"] --> B["Enter Rescue DFU (Hold 6 + RESET)"]
-    B --> C["Flash Slot B via dfu-util (One-time setup)"]
-    C --> D["Enter Rescue DFU again (Hold 6 + RESET)"]
-    D --> E["Run './target/release/wirehax' (Every boot)"]
-    E --> F["WireHax reads bootloader over USB & executes chainloader"]
-    F --> G["Calculator boots custom OS in Slot B!"]
-    G --> H["Need stock OS? Press RESET normally to boot Slot A"]
-```
-
-1. **Obtain/Build Slot B Firmware:** Compile or obtain a raw binary firmware (such as Omega, Upsilon, or a custom Epsilon build) linked to run at base address `0x90400000`.
-   *(Note: A pre-built Slot B sample image and dedicated build guide will be added in a future update).*
-2. **Flash Slot B (One-time):** Put the calculator in rescue DFU, then flash the binary to `0x90400000` using `dfu-util`.
-3. **Boot via WireHax (Every boot):** Put the calculator in rescue DFU, then run `wirehax`. WireHax will inspect the bootloader over USB on the fly and trigger the ROP boot.
-4. **Return to Stock:** Press the rear **RESET** button without holding any keys. The calculator reboots back into the official stock OS in Slot A.
-
 ---
 
 ## Setup & Build
 
->[!TIP]
->If you just want to run WireHax on your calculator, you can skip building
->from source and grab a binary from the releases page instead.
-
 Build the standalone binary using Cargo:
 
 ```sh
-# On Debian/Ubuntu install build dependencies if building from source:
-# sudo apt install libudev-dev pkg-config
-
 cargo build --release
 ```
 
-The resulting binary is located at `target/release/wirehax` (or `target/release/wirehax.exe` on Windows).
+The resulting binary is located at `target/release/wirehax`.
 
 ---
 
@@ -143,46 +85,9 @@ When you run:
 
 WireHax connects to the calculator over USB, automatically dumps the internal flash bootloader into memory to identify the model and gadgets, and stages the exploit on the fly.
 
-> The `--firmware <path>` option is purely an optional performance shortcut: if you already dumped your flash previously, passing `--firmware firmware/internal-flash-live.bin` skips reading flash over USB and boots faster.
-
-### Self-Check (Why It Fails Out of the Box)
-
-If you run `wirehax self-check` on a fresh repository clone:
-
-```sh
-./target/release/wirehax self-check
-```
-
-You will see:
-
-```text
-Error: Self-check requires a firmware binary. Dump one with wirehax dump or supply one with --firmware <path>.
-```
-
-**Why this happens:** WireHax intentionally does not bundle proprietary NumWorks bootloader binaries in the Git repository (`firmware/` is excluded). The `self-check` command needs a real firmware binary to test symbol extraction and gadget resolution.
-
-To use `self-check`:
-1. Connect your calculator in rescue DFU.
-2. Dump your bootloader once:
-   ```sh
-   ./target/release/wirehax dump
-   ```
-   (This saves your calculator's flash to `firmware/internal-flash-live.bin`).
-3. Now run self-check:
-   ```sh
-   ./target/release/wirehax self-check
-   ```
-   Output:
-   ```text
-   Self-check: inspecting bootloader hash and selecting codebase...
-     Detected bootloader: ...
-   Self-check [bootloader codebase]: resolving symbols and validating stage layout...
-   SELF_CHECK_OK
-   ```
-
 ### Dumping Flash
 
-WireHax can dump internal flash memory over USB DFU:
+WireHax can dump internal flash memory over USB:
 
 ```sh
 ./target/release/wirehax dump [-o <output>] [-s <size>] [-a <address>] [-A <alt>]
