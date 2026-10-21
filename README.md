@@ -202,16 +202,10 @@ A bare-metal C++ firmware application located in [`examples/overwrite_bootloader
 
 ## How It Works
 
->[!TIP]
->**Looking for the Original Python Prototype?**  
->If you want to study the bare exploit mechanics in simple, linear Python, check out the `Python` branch.  
->The Python branch preserves the original research proof-of-concept as received from [Andrei](https://github.com/andr3i1010). Because it is written as a single sequential script (`wirehax.py`), it is much easier to read for educational purposes and for tracing the ROP control flow.  
->*Note:* The Python prototype relies on static, hardcoded gadget offsets and does **not work on live devices out of the box**. Use the Rust implementation on `main` for dynamic address resolution, multi-version support, and live-device execution.
-
 ### Dynamic Resolution & Dual Bootloader Support
 
 The original WireHax by [Andrei](https://github.com/andr3i1010) (archived on the [`Python` branch](../../tree/Python)) relied on static
-gadget addresses for a single firmware build. This version supports two distinct
+gadget addresses for a single firmware build. The current version supports two distinct
 bootloader architectural families and dynamically resolves gadget addresses,
 callbacks, and vtables at runtime using Thumb-2 byte signature scanning
 ([`src/sigscan.rs`](src/sigscan.rs) and [`src/boot/v24_26.rs`](src/boot/v24_26.rs)):
