@@ -19,6 +19,11 @@ volatile uint32_t* const FLASH_OPTSR_CUR = reinterpret_cast<volatile uint32_t*>(
 volatile uint32_t* const FLASH_OPTCCR    = reinterpret_cast<volatile uint32_t*>(FLASH_BASE + 0x24);
 volatile uint32_t* const FLASH_WPSN_CUR  = reinterpret_cast<volatile uint32_t*>(FLASH_BASE + 0x38);
 volatile uint32_t* const FLASH_WPSN_PRG  = reinterpret_cast<volatile uint32_t*>(FLASH_BASE + 0x3C);
+volatile uint32_t* const FLASH_BOOT_CUR  = reinterpret_cast<volatile uint32_t*>(FLASH_BASE + 0x40);
+volatile uint32_t* const FLASH_BOOT_PRG  = reinterpret_cast<volatile uint32_t*>(FLASH_BASE + 0x44);
+
+constexpr uint32_t ROM_BOOT_ADDRESS = 0x1FF0;
+constexpr uint32_t ROM_BOOT_ADDRESSES = ROM_BOOT_ADDRESS | (ROM_BOOT_ADDRESS << 16);
 
 // Flash unlock keys
 constexpr uint32_t FLASH_KEY1 = 0x45670123;
@@ -37,7 +42,7 @@ constexpr uint32_t FLASH_CR_START = (1 << 7);
 // FLASH_OPTCR bits
 constexpr uint32_t OPT_LOCK             = (1 << 0);
 constexpr uint32_t OPT_START            = (1 << 1);  // OPTSTART: writes PRG → NVM
-constexpr uint32_t OBL_LAUNCH           = (1 << 4);  // OBL_LAUNCH: forces reset + NVM → CUR reload
+constexpr uint32_t OBL_LAUNCH           = (1 << 4);  // OBL_LAUNCH: reloads option bytes from NVM
 constexpr uint32_t OPT_OPTCHANGEERR     = (1 << 30);
 constexpr uint32_t OPT_CLR_OPTCHANGEERR = (1 << 30);
 
@@ -94,21 +99,15 @@ struct WrpPrgResult {
     uint32_t optsr_val;
     uint32_t flash_sr_val;
     uint32_t prg_after;
-    uint32_t cur_before;     // WPSN_CUR immediately after writing WPSN_PRG
     uint32_t cur_after;      // WPSN_CUR after OBL_LAUNCH completes
-    uint32_t initial_sr;     // FLASH_SR before any operations (BSY/QW stuck?)
-    uint32_t initial_optsr;  // FLASH_OPTSR_CUR before any operations
-    uint32_t optstart_iters; // loop iterations for OPT_START to clear (near-zero = rejected)
+    uint32_t boot_after;
+    uint32_t boot_prg_after;
 };
 
-static WrpPrgResult disable_wrp_prg() {
+static WrpPrgResult program_recovery_options(uint32_t bootAddresses, uint32_t wpsnProgram) {
     WrpPrgResult res = {};
 
-    // 0. Snapshot registers BEFORE touching anything — key diagnostic data
-    res.initial_sr    = *FLASH_SR;
-    res.initial_optsr = *FLASH_OPTSR_CUR;
-
-    // 1. Clear any pending Bank-1 errors and OPTCHANGEERR before we start
+    // Clear pending errors before unlocking the flash and option-byte registers.
     *FLASH_CCR  = 0x0FFE0000;  // clear all Bank 1 error/status bits (EOP, CRCEND, errors)
     *FLASH_OPTCCR = OPT_CLR_OPTCHANGEERR;
     __asm__ volatile ("dsb sy\nisb");
@@ -121,6 +120,9 @@ static WrpPrgResult disable_wrp_prg() {
         __asm__ volatile ("dsb sy\nisb");
     }
     res.cr_unlocked = ((*FLASH_CR & FLASH_CR_LOCK) == 0);
+    if (!res.cr_unlocked) {
+        return res;
+    }
 
     // 3. Unlock FLASH_OPTCR
     if (*FLASH_OPTCR & OPT_LOCK) {
@@ -132,18 +134,16 @@ static WrpPrgResult disable_wrp_prg() {
     res.optcr_val = *FLASH_OPTCR;
     res.opt_unlocked = ((res.optcr_val & OPT_LOCK) == 0);
     if (!res.opt_unlocked) {
+        *FLASH_CR |= FLASH_CR_LOCK;
         return res;
     }
 
-    // 4. Write WPSN_PRG1 = 0xFF (all sectors unprotected, WRP is active-low)
-    *FLASH_WPSN_PRG = 0x000000FF;
+    // Keep Bank 1 writable and select the requested BOOT_ADD0/BOOT_ADD1 values.
+    *FLASH_WPSN_PRG = wpsnProgram;
+    *FLASH_BOOT_PRG = bootAddresses;
     __asm__ volatile ("dsb sy\nisb");
 
-    // Snapshot CUR immediately after writing PRG (before OPT_START)
-    res.cur_before = *FLASH_WPSN_CUR;
-
-    // 5. Commit PRG → NVM via OPTSTART, then reload NVM → CUR via OBL_LAUNCH.
-    //    Clear error flags one more time right before the trigger.
+    // Commit PRG → NVM via OPTSTART, then reload NVM → CUR via OBL_LAUNCH.
     *FLASH_OPTCCR = OPT_CLR_OPTCHANGEERR;
     *FLASH_CCR    = 0x0FFE0000;
     __asm__ volatile ("dsb sy\nisb");
@@ -151,53 +151,60 @@ static WrpPrgResult disable_wrp_prg() {
     *FLASH_OPTCR |= OPT_START;
     __asm__ volatile ("dsb sy\nisb");
 
-    // 6. Wait for OPT_START to self-clear (NVM write complete).
-    //    CRITICAL DIAGNOSTIC: near-zero iters = OPTSTART was silently rejected.
+    // Wait for OPTSTART to finish writing option bytes.
     uint32_t iters = 0;
     while ((*FLASH_OPTCR & OPT_START) && iters < 5000000u) {
         __asm__ volatile ("nop");
         ++iters;
     }
-    res.optstart_iters = iters;
     if (iters >= 5000000u) {
         res.timeout = true;
-        // Re-lock and bail — something is badly wrong
         *FLASH_OPTCR |= OPT_LOCK;
         *FLASH_CR    |= FLASH_CR_LOCK;
         return res;
     }
 
-    // 7. Fire OBL_LAUNCH: reloads NVM → _CUR registers in-place.
-    //    On STM32H725, OBL_LAUNCH returns normally (no hard reset occurs) —
-    //    the _CUR registers are simply updated in-place after the bit self-clears.
-    //    Per RM0468 §4.4.2: OPTSTART must have completed before OBL_LAUNCH.
+    // Reload the committed option bytes into the current registers.
     *FLASH_OPTCR |= OBL_LAUNCH;
     __asm__ volatile ("dsb sy\nisb");
 
-    // Wait for OBL_LAUNCH to self-clear (CUR reload complete).
     uint32_t oblIters = 0;
     while ((*FLASH_OPTCR & OBL_LAUNCH) && oblIters < 5000000u) {
         __asm__ volatile ("nop");
         ++oblIters;
     }
-    // Small settling delay after OBL_LAUNCH
-    for (volatile int d = 0; d < 10000; ++d) { __asm__ volatile ("nop"); }
+    if (oblIters >= 5000000u) {
+        res.timeout = true;
+        *FLASH_OPTCR |= OPT_LOCK;
+        *FLASH_CR    |= FLASH_CR_LOCK;
+        return res;
+    }
 
-    // 8. Read back results — WPSN_CUR should now reflect PRG (= 0xFF).
+    // Verify the write protection and boot addresses before touching flash.
     res.cur_after    = *FLASH_WPSN_CUR;
     res.optsr_val    = *FLASH_OPTSR_CUR;
     res.flash_sr_val = *FLASH_SR;
     res.prg_after    = *FLASH_WPSN_PRG;
+    res.boot_after   = *FLASH_BOOT_CUR;
+    res.boot_prg_after = *FLASH_BOOT_PRG;
 
     if (res.optsr_val & OPT_OPTCHANGEERR) {
         res.change_err = true;
     }
 
-    // 9. Re-lock option bytes and flash
+    // Re-lock option bytes and flash.
     *FLASH_OPTCR |= OPT_LOCK;
     *FLASH_CR    |= FLASH_CR_LOCK;
 
     return res;
+}
+
+[[noreturn]] static void reboot_to_rom_dfu() {
+    volatile uint32_t* const SCB_AIRCR = reinterpret_cast<volatile uint32_t*>(0xE000ED0C);
+    __asm__ volatile ("cpsid i\ndsb sy");
+    *SCB_AIRCR = 0x05FA0004; // VECTKEY | SYSRESETREQ
+    __asm__ volatile ("dsb sy");
+    while (true) { __asm__ volatile ("wfi"); }
 }
 
 static bool flash_unlock() {
@@ -296,6 +303,7 @@ extern "C" int main() {
     // Read current option byte state
     uint32_t wpsnCur = *FLASH_WPSN_CUR;
     uint32_t wpsnPrg = *FLASH_WPSN_PRG;
+    uint32_t originalBootAddresses = *FLASH_BOOT_CUR;
 
     display.drawString(boxX + 10, boxY + 10, "HARDWARE STATUS:", Color::Cyan, Color::Surface);
     display.drawString(boxX + 10, boxY + 28, "WRP0_CUR : ", Color::TextDim, Color::Surface);
@@ -307,86 +315,54 @@ extern "C" int main() {
     display.drawString(boxX + 100, boxY + 44, buf, (wpsnPrg & 1) ? Color::Green : Color::Red, Color::Surface);
 
     // =========================================================================
-    // PHASE 1: Write Protection Check & Option Byte Reload via OBL_LAUNCH
+    // PHASE 1: Arm ROM recovery before any internal flash erase.
     // =========================================================================
-    if ((wpsnCur & 1) == 0) {
-        // Sector 0 write protection is currently ACTIVE in hardware (_CUR)
-        display.drawString(boxX + 10, boxY + 62, "PHASE 1: Disabling WRP in flash...", Color::NumWorksYellow, Color::Surface);
+    display.drawString(boxX + 10, boxY + 62, "PHASE 1: Arming ROM DFU fallback...", Color::NumWorksYellow, Color::Surface);
 
-        WrpPrgResult prgRes = disable_wrp_prg();
+    uint32_t wpsnProgram = (wpsnCur & 1) ? (wpsnCur & 0xFF) : 0xFF;
+    WrpPrgResult prgRes = program_recovery_options(ROM_BOOT_ADDRESSES, wpsnProgram);
+    bool fallbackArmed = prgRes.cr_unlocked && prgRes.opt_unlocked && !prgRes.timeout &&
+                         !prgRes.change_err && (prgRes.prg_after & 0xFF) == wpsnProgram &&
+                         (prgRes.cur_after & 0xFF) == wpsnProgram &&
+                         prgRes.boot_after == ROM_BOOT_ADDRESSES &&
+                         prgRes.boot_prg_after == ROM_BOOT_ADDRESSES;
 
-        // PRG must be 0xFF, opt must be unlocked, no errors
-        bool success = prgRes.opt_unlocked && !prgRes.timeout && !prgRes.change_err && (prgRes.prg_after & 1);
-
-        if (!success) {
-            if (!prgRes.opt_unlocked) {
-                display.drawString(boxX + 10, boxY + 82, "FAILED: OPTCR Unlock Failed!", Color::Red, Color::Surface);
-            } else if (prgRes.change_err) {
-                display.drawString(boxX + 10, boxY + 82, "FAILED: OPTCHANGEERR flag set!", Color::Red, Color::Surface);
-            } else if (prgRes.timeout) {
-                display.drawString(boxX + 10, boxY + 82, "FAILED: Timeout waiting for BSY!", Color::Red, Color::Surface);
-            } else {
-                display.drawString(boxX + 10, boxY + 82, "FAILED: WRP0_PRG not written!", Color::Red, Color::Surface);
-            }
-
-            display.drawString(boxX + 10, boxY + 102, "OPTCR : ", Color::TextDim, Color::Surface);
-            hex32(prgRes.optcr_val, buf);
-            display.drawString(boxX + 80, boxY + 102, buf, Color::TextLight, Color::Surface);
-
-            display.drawString(boxX + 10, boxY + 118, "OPTSR : ", Color::TextDim, Color::Surface);
-            hex32(prgRes.optsr_val, buf);
-            display.drawString(boxX + 80, boxY + 118, buf, Color::TextLight, Color::Surface);
-
-            display.drawString(boxX + 10, boxY + 134, "SR    : ", Color::TextDim, Color::Surface);
-            hex32(prgRes.flash_sr_val, buf);
-            display.drawString(boxX + 80, boxY + 134, buf, Color::TextLight, Color::Surface);
-
-            display.drawString(boxX + 10, boxY + 150, "PRG   : ", Color::TextDim, Color::Surface);
-            hex32(prgRes.prg_after, buf);
-            display.drawString(boxX + 80, boxY + 150, buf, Color::TextLight, Color::Surface);
-
-            while (true) { __asm__ volatile ("wfi"); }
-        }
-
-
-        // PRG+OBL_LAUNCH succeeded — show CUR before/after for diagnostics
-        display.drawString(boxX + 10, boxY + 76, "PRG+OBL OK:", Color::Green, Color::Surface);
-
-        display.drawString(boxX + 10, boxY + 92,  "CUR_BEF:", Color::TextDim, Color::Surface);
-        hex32(prgRes.cur_before, buf);
-        display.drawString(boxX + 80, boxY + 92, buf, (prgRes.cur_before & 1) ? Color::Green : Color::Red, Color::Surface);
-
-        display.drawString(boxX + 10, boxY + 108, "CUR_AFT:", Color::TextDim, Color::Surface);
-        hex32(prgRes.cur_after, buf);
-        display.drawString(boxX + 80, boxY + 108, buf, (prgRes.cur_after & 1) ? Color::Green : Color::Red, Color::Surface);
-
-        display.drawString(boxX + 10, boxY + 124, "OPTSR:  ", Color::TextDim, Color::Surface);
+    if (!fallbackArmed) {
+        display.drawString(boxX + 10, boxY + 82, "FAILED: ROM fallback not confirmed!", Color::Red, Color::Surface);
+        display.drawString(boxX + 10, boxY + 102, "OPTCR : ", Color::TextDim, Color::Surface);
+        hex32(prgRes.optcr_val, buf);
+        display.drawString(boxX + 80, boxY + 102, buf, Color::TextLight, Color::Surface);
+        display.drawString(boxX + 10, boxY + 118, "OPTSR : ", Color::TextDim, Color::Surface);
         hex32(prgRes.optsr_val, buf);
-        display.drawString(boxX + 80, boxY + 124, buf, Color::TextLight, Color::Surface);
-
-        // On STM32H725, OBL_LAUNCH returns normally and _CUR is updated in-place.
-        // WPSN_CUR should already be 0xFF here — proceed directly to Phase 2, no reset.
-        if ((prgRes.cur_after & 0xFF) == 0xFF) {
-            display.drawString(boxX + 10, boxY + 142, "CUR=FF! Flashing NOW (no reset)...", Color::Green, Color::Surface);
-            delay_ms(1000);
-            goto phase2;
-        }
-
-        // CUR still not updated — unexpected; show state and halt.
-        display.drawString(boxX + 10, boxY + 142, "ERROR: CUR not 0xFF after OBL_LAUNCH!", Color::Red, Color::Surface);
+        display.drawString(boxX + 80, boxY + 118, buf, Color::TextLight, Color::Surface);
+        display.drawString(boxX + 10, boxY + 134, "BOOT  : ", Color::TextDim, Color::Surface);
+        hex32(prgRes.boot_after, buf);
+        display.drawString(boxX + 80, boxY + 134, buf, Color::TextLight, Color::Surface);
+        display.drawString(boxX + 10, boxY + 150, "SR    : ", Color::TextDim, Color::Surface);
+        hex32(prgRes.flash_sr_val, buf);
+        display.drawString(boxX + 80, boxY + 150, buf, Color::TextLight, Color::Surface);
         while (true) { __asm__ volatile ("wfi"); }
     }
 
-    // =========================================================================
-    // PHASE 2: WRP is UNLOCKED (_CUR & 1 == 1) - Proceed to Overwrite Sector 0
-    // =========================================================================
-    phase2:
+    display.drawString(boxX + 10, boxY + 76, "ROM fallback armed for both BOOT states.", Color::Green, Color::Surface);
+    display.drawString(boxX + 10, boxY + 92, "WRP_CUR:", Color::TextDim, Color::Surface);
+    hex32(prgRes.cur_after, buf);
+    display.drawString(boxX + 80, boxY + 92, buf, Color::Green, Color::Surface);
+    display.drawString(boxX + 10, boxY + 108, "BOOT_CUR:", Color::TextDim, Color::Surface);
+    hex32(prgRes.boot_after, buf);
+    display.drawString(boxX + 80, boxY + 108, buf, Color::Green, Color::Surface);
+    display.drawString(boxX + 10, boxY + 124, "Power loss now still boots STM32 ROM.", Color::TextLight, Color::Surface);
+    display.drawString(boxX + 10, boxY + 142, "Starting overwrite...", Color::Green, Color::Surface);
+    delay_ms(500);
 
+    // =========================================================================
+    // PHASE 2: ROM fallback is armed; proceed to overwrite internal flash.
+    // =========================================================================
     // Clear the info box so Phase 1 diagnostics don't overlay Phase 2 output.
     display.fillRect(boxX, boxY, boxW, boxH, Color::Surface);
     display.drawRect(boxX, boxY, boxW, boxH, Color::SurfaceBorder);
 
-    display.drawString(boxX + 10, boxY + 10, "PHASE 2: WRP DISABLED. Overwriting...", Color::Green, Color::Surface);
+    display.drawString(boxX + 10, boxY + 10, "PHASE 2: ROM fallback armed...", Color::Green, Color::Surface);
 
     // Wait for the flash controller to be fully idle after OBL_LAUNCH.
     // BSY and QW can remain set for a short time after the option-byte reload;
@@ -406,7 +382,9 @@ extern "C" int main() {
     // 1. Unlock Flash Interface
     if (!flash_unlock()) {
         display.drawString(boxX + 10, boxY + 28, "FLASH_CR : UNLOCK FAILED!", Color::Red, Color::Surface);
-        while (true) { __asm__ volatile ("wfi"); }
+        display.drawString(boxX + 10, boxY + 46, "Rebooting into ROM DFU...", Color::NumWorksYellow, Color::Surface);
+        delay_ms(500);
+        reboot_to_rom_dfu();
     }
 
     // 2. Determine which 128 KB sectors contain non-0xFF data and erase them
@@ -444,7 +422,9 @@ extern "C" int main() {
             display.drawString(boxX + 10, boxY + 46, "FLASH_SR : ", Color::TextDim, Color::Surface);
             display.drawString(boxX + 100, boxY + 46, buf, Color::Red, Color::Surface);
             flash_lock();
-            while (true) { __asm__ volatile ("wfi"); }
+            display.drawString(boxX + 10, boxY + 64, "Rebooting into ROM DFU...", Color::NumWorksYellow, Color::Surface);
+            delay_ms(500);
+            reboot_to_rom_dfu();
         } else if (eraseSr & FLASH_SR_WRPERR) {
             char failMsg[48] = "ERASE Sector X : FAILED (WRPERR)";
             failMsg[13] = static_cast<char>('0' + s);
@@ -452,7 +432,9 @@ extern "C" int main() {
             display.drawString(boxX + 10, boxY + 46, "SR Error : ", Color::TextDim, Color::Surface);
             display.drawString(boxX + 100, boxY + 46, buf, Color::Red, Color::Surface);
             flash_lock();
-            while (true) { __asm__ volatile ("wfi"); }
+            display.drawString(boxX + 10, boxY + 64, "Rebooting into ROM DFU...", Color::NumWorksYellow, Color::Surface);
+            delay_ms(500);
+            reboot_to_rom_dfu();
         } else if (eraseSr & FLASH_ERRORS) {
             char failMsg[48] = "ERASE Sector X : FAILED (ERROR)";
             failMsg[13] = static_cast<char>('0' + s);
@@ -460,7 +442,9 @@ extern "C" int main() {
             display.drawString(boxX + 10, boxY + 46, "FLASH_SR : ", Color::TextDim, Color::Surface);
             display.drawString(boxX + 100, boxY + 46, buf, Color::Red, Color::Surface);
             flash_lock();
-            while (true) { __asm__ volatile ("wfi"); }
+            display.drawString(boxX + 10, boxY + 64, "Rebooting into ROM DFU...", Color::NumWorksYellow, Color::Surface);
+            delay_ms(500);
+            reboot_to_rom_dfu();
         }
     }
 
@@ -548,7 +532,9 @@ extern "C" int main() {
         hex32(failedAddr, buf);
         display.drawString(boxX + 100, boxY + 82, buf, Color::Red, Color::Surface);
         flash_lock();
-        while (true) { __asm__ volatile ("wfi"); }
+        display.drawString(boxX + 10, boxY + 100, "Rebooting into ROM DFU...", Color::NumWorksYellow, Color::Surface);
+        delay_ms(500);
+        reboot_to_rom_dfu();
     }
 
     // Complete Progress Bar
@@ -576,17 +562,33 @@ extern "C" int main() {
 
     flash_lock();
 
-    if (verifyOk) {
-        display.drawString(boxX + 10, boxY + 82,  "VERIFY   : 100% MATCH! Zero Errors.     ", Color::Green, Color::Surface);
-        display.drawString(boxX + 10, boxY + 100, "Status   : Bootloader rewritten successfully!", Color::NumWorksYellow, Color::Surface);
-    } else {
+    if (!verifyOk) {
         display.drawString(boxX + 10, boxY + 82, "VERIFY   : MISMATCH!                   ", Color::Red, Color::Surface);
         hex32(mismatchAddr, buf);
         display.drawString(boxX + 10, boxY + 100, "Address  : ", Color::TextDim, Color::Surface);
         display.drawString(boxX + 100, boxY + 100, buf, Color::Red, Color::Surface);
+        display.drawString(boxX + 10, boxY + 118, "Rebooting into ROM DFU...", Color::NumWorksYellow, Color::Surface);
+        delay_ms(500);
+        reboot_to_rom_dfu();
     }
 
-    display.drawString(10, 218, "Press rear RESET to reboot into stock bootloader.", Color::TextDim, Color::Background);
+    display.drawString(boxX + 10, boxY + 82, "VERIFY   : 100% MATCH! Zero Errors.     ", Color::Green, Color::Surface);
+    display.drawString(boxX + 10, boxY + 100, "Restoring saved boot configuration...", Color::NumWorksYellow, Color::Surface);
+    WrpPrgResult restoreRes = program_recovery_options(originalBootAddresses, wpsnProgram);
+    bool restoreOk = restoreRes.cr_unlocked && restoreRes.opt_unlocked && !restoreRes.timeout &&
+                     !restoreRes.change_err && (restoreRes.prg_after & 0xFF) == wpsnProgram &&
+                     (restoreRes.cur_after & 0xFF) == wpsnProgram &&
+                     restoreRes.boot_after == originalBootAddresses &&
+                     restoreRes.boot_prg_after == originalBootAddresses;
+    if (!restoreOk) {
+        display.drawString(boxX + 10, boxY + 118, "Restore failed; forcing ROM DFU...", Color::Red, Color::Surface);
+        (void)program_recovery_options(ROM_BOOT_ADDRESSES, wpsnProgram);
+        delay_ms(500);
+        reboot_to_rom_dfu();
+    }
+
+    display.drawString(boxX + 10, boxY + 118, "Boot configuration restored.", Color::Green, Color::Surface);
+    display.drawString(10, 218, "Press rear RESET to reboot into the rewritten bootloader.", Color::TextDim, Color::Background);
 
     while (true) {
         __asm__ volatile ("wfi");

@@ -3,7 +3,7 @@ This script will patch a binary file to make the kernel
 verification (before a slot is booted) always return success,
 effectively always booting slot A no matter what is in it.
 
-The signature detection works on Epsilon 26.3.0, not sure about the others.
+The signature matcher handles the known modern and legacy bootloader prologues.
 
 Usage:
   Bootloader:
@@ -18,7 +18,10 @@ import argparse
 import os
 import re
 
-PATTERN = "2D E9 F0 41 D0 E9 00 54 8C B0"
+PATTERNS = (
+    "2D E9 F0 41 D0 E9 00 54 8C B0",  # Modern bootloaders
+    "2D E9 F0 41 05 68 8C B0",  # Legacy bootloaders
+)
 PATCH_BYTES = bytes([0x01, 0x20, 0x70, 0x47])
 
 
@@ -41,13 +44,18 @@ def get_default_output_path(input_path):
 
 
 def patch_signature_file(
-    input_path, output_path, pattern_str, patch_bytes, base_address=0
+    input_path, output_path, patterns, patch_bytes, base_address=0
 ):
     with open(input_path, "rb") as f:
         data = bytearray(f.read())
 
-    regex = pattern_to_regex(pattern_str)
-    matches = [m.start() for m in re.finditer(regex, data, flags=re.DOTALL)]
+    matches = sorted(
+        {
+            m.start()
+            for pattern in patterns
+            for m in re.finditer(pattern_to_regex(pattern), data, flags=re.DOTALL)
+        }
+    )
     match_count = len(matches)
 
     if match_count == 0:
@@ -99,7 +107,7 @@ if __name__ == "__main__":
     patch_signature_file(
         args.binary,
         args.output,
-        PATTERN,
+        PATTERNS,
         PATCH_BYTES,
         base_address=args.base,
     )

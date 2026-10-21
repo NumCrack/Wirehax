@@ -7,10 +7,13 @@ It provides an on-screen diagnostic dashboard on the calculator's LCD to test ST
 >[!CAUTION]
 >**HIGH BRICK RISK:**
 >Overwriting internal flash (`0x08000000`) is an advanced research and recovery procedure.
->If the sector erase succeeds but writing fails, or if the supplied bootloader binary is invalid or corrupt,
->**your calculator will be hard-bricked** and unable to boot into either regular mode or rescue DFU.
+>Before erasing, the utility sets and verifies both boot addresses to STM32 system memory. If erase, programming,
+>or readback verification fails, it leaves that recovery setting in place and requests a warm reset into the STM32 ROM
+>bootloader. With USB connected, the ROM bootloader provides DFU while the calculator remains powered on.
+>If the fallback option bytes cannot be programmed, power is lost during option-byte programming, or ROM DFU is unavailable,
+>recovery may still require an external ST-Link/SWD programmer.
 >
->Do **NOT** run this utility unless you have access to an external hardware ST-Link / SWD debugger and have verified your ability to recover the device.
+>Do **NOT** run this utility unless you decent soldering skills, an ST-Link programmer, and a backup of your original bootloader binary.
 
 ---
 
@@ -20,11 +23,9 @@ When booted into Slot B by WireHax:
 
 1. **Initializes the Display:** Takes control of the display controller (ST7789V) and renders an on-device diagnostic interface.
 2. **Checks Flash Protection:** Unlocks the STM32H7 Flash control registers (`0x52002000`) using standard keys and queries `FLASH_WPSN_CUR` for write-protection status.
-3. **Tests Writeability:**
-   - If Sector 0 is protected, the display immediately reports a write-protection error (`WRPERR`) and halts safely without damaging the existing bootloader.
-   - If Sector 0 is writable, it erases the necessary 128 KiB sectors in Bank 1.
-4. **Programs the Bootloader:** Embeds the bootloader image provided at build time, flashing it in 256-bit (32-byte) blocks with a real-time progress bar on the LCD.
-5. **Readback Verification:** Compares the written internal flash memory against the original image byte-for-byte and displays the verification status (`100% MATCH` or mismatch address).
+3. **Arms ROM Recovery:** Sets both boot addresses to the STM32 system ROM and verifies the option-byte readback before any internal flash erase. This makes the ROM bootloader the reset target for either BOOT pin state until the rewrite is verified.
+4. **Erases and Programs:** Disables write protection when needed, erases the required 128 KiB sectors in Bank 1, and writes the embedded replacement bootloader.
+5. **Readback Verification:** Compares the written internal flash memory against the image byte-for-byte. On a mismatch, it keeps the ROM boot setting and warm-resets into DFU. On a full match, it restores the boot addresses saved at startup.
 
 ---
 
