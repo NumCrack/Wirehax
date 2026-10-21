@@ -1,22 +1,26 @@
-# Legal & Disclaimers
+# Legal
 
-## Trademark Notice
-**NumWorks** and **Epsilon** are registered trademarks of NumWorks SAS. WireHax is an independent open-source project and is **not affiliated with, maintained, authorized, endorsed, or sponsored by NumWorks SAS** or any of its subsidiaries. All registered trademarks, product names, and company names or logos mentioned in this repository are the property of their respective holders. Their use here does not imply any affiliation with or endorsement by them, and constitutes nominative fair use to describe the hardware compatibility of this software.
+## Trademarks
 
-## No Proprietary Code or Firmware Distribution
-This repository contains **no copyrighted binaries, bootloaders, firmware images, cryptographic keys, or proprietary code** owned by NumWorks SAS. WireHax executes entirely in volatile SRAM and generates payload structures dynamically on the host machine. Any firmware dumps or custom operating system binaries used with this tool must be legitimately extracted or compiled by the end user from hardware they legally own.
+NumWorks and Epsilon are registered trademarks of NumWorks SAS. WireHax is an independent open-source project with no connection to them. NumWorks didn't write it, review it, or approve it. Their names show up here only to say which hardware this works with, and any other names or logos mentioned belong to their owners.
 
-## Research & Interoperability Purpose
-WireHax is distributed exclusively for:
-1. **Academic and Security Research:** To document and analyze memory safety vulnerabilities and execution flows within embedded DFU bootloaders.
-2. **Software Interoperability:** To enable lawful owners of physical hardware to execute independently developed open-source operating systems (e.g., Omega, Upsilon, Linux) on devices they own, in accordance with the interoperability provisions of **Directive 2009/24/EC** (Article 6) in the European Union and **17 U.S.C. § 1201(f)** in the United States.
+## What's in this repo
 
-## Academic Integrity & Exam Mode Warning
-WireHax is **not designed or intended to facilitate academic dishonesty or cheating**. Installing or running custom firmware on a graphing calculator may:
-- Invalidate the device's compliance with standardized examination regulations (such as French *Circulaire n° 2015-178*, College Board, or IB guidelines).
-- Disable or compromise the authenticity of the official "Exam Mode" indicator LED.
+There is no NumWorks code here: no firmware images, bootloaders, binaries, or keys. WireHax runs entirely from SRAM and builds its payloads on your computer when you run it. If you want to run a firmware dump or a custom OS, you have to extract it from a calculator you own or compile it yourself.
 
-Users are strictly prohibited from using modified devices in official examinations where restricted firmware or unmodified stock operating systems are required. The authors assume no responsibility for any sanctions, disqualifications, or academic disciplinary actions resulting from the misuse of this tool.
+## Why this exists
 
-## Disclaimer of Warranty & Limitation of Liability
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES, LOSS OF DATA, DEVICE BRICKING, PERMANENT HARDWARE LOCKOUT, VOIDED MANUFACTURER WARRANTIES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+WireHax is for two things:
+
+1. **Research**: documenting how memory-safety bugs and execution flow work in NumWorks DFU
+2. **Interoperability**: letting people who own a calculator run independent open-source operating systems on it (Omega, Upsilon, LibreCalc, etc). This is in line with the interoperability provisions of Article 6 of EU Directive 2009/24/EC and 17 U.S.C. § 1201(f) in the US.
+
+## Exams
+
+WireHax is under no way, shape or form intended for cheating. But running custom firmware can make your calculator non-compliant with exam rules (France's circulaire n° 2015-178, the College Board, the IB, and others), and it can break the Exam Mode LED, so the LED can't be trusted to show the real state of the device.
+
+Please, don't take a modified calculator into an exam that requires stock firmware. If you do and get sanctioned or disqualified, that's on you. The authors aren't responsible.
+
+## No warranty
+
+This software is provided as is, with no warranty of any kind. If it bricks your calculator, locks you out of it, wipes your data, that's your risk. The authors and copyright holders aren't liable for any claim or damages arising from its use, whether in contract, tort, or otherwise.
