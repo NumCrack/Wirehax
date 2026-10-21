@@ -4,7 +4,7 @@ Builds a bootloader wiper binary that:
 1. Boots as bootloader at 0x08000000.
 2. Uses the stock bootloader's hardware initialization (clocks, PLL, MPU, OCTOSPI).
 3. Turns ON the Red LED (PB4).
-4. Invokes the stock bootloader's hardware Chip Erase routine (0x08007274)
+4. Invokes the stock bootloader's hardware Chip Erase routine (default address 0x08007274)
    which erases all 8 MB of external flash (Slot A + Slot B) via SPI command 0xC7.
 5. Turns OFF Red LED and turns ON Green LED (PB5).
 6. Halts safely in low-power sleep (WFI).
@@ -13,12 +13,10 @@ There is no reason at all to use this unless you are doing a full factory reset 
 It will hard brick your device and make it recoverable only with an SWD debugger.
 """
 
-import sys
+import argparse
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-SRC_BIN = ROOT / "firmware" / "bootloader.bin"
-OUT_BIN = ROOT / "firmware" / "examples" / "wipe_slots" / "bootloader.bin"
+CHIP_ERASE_LITERAL_OFFSET = 66
 
 # Exact 74-byte machine code aligned for offset 0x8DD2
 # (0x00, 0xBF is NOP to align code start to 4-byte boundary 0x08008DD4)
@@ -104,23 +102,49 @@ WIPER_CODE = bytes(
 )
 
 
-def build():
-    if not SRC_BIN.exists():
-        sys.exit(f"Error: {SRC_BIN} not found.")
+def build(src_bin, out_bin, offset, chip_erase_address):
+    if not src_bin.is_file():
+        raise SystemExit(f"Error: input bootloader not found: {src_bin}")
+    if src_bin.resolve() == out_bin.resolve():
+        raise SystemExit("Error: input and output paths must be different.")
 
-    data = bytearray(SRC_BIN.read_bytes())
-    offset = 0x8DD2
+    data = bytearray(src_bin.read_bytes())
+    if offset < 0 or offset + len(WIPER_CODE) > len(data):
+        raise SystemExit(f"Error: hook offset 0x{offset:X} does not fit in {src_bin}.")
+    if not 0 <= chip_erase_address <= 0xFFFFFFFF:
+        raise SystemExit("Error: chip erase address must fit in 32 bits.")
 
-    # Insert wiper code right where the slot check originally ran
-    data[offset : offset + len(WIPER_CODE)] = WIPER_CODE
+    wiper_code = bytearray(WIPER_CODE)
+    wiper_code[CHIP_ERASE_LITERAL_OFFSET : CHIP_ERASE_LITERAL_OFFSET + 4] = (
+        (chip_erase_address | 1).to_bytes(4, "little")
+    )
+    data[offset : offset + len(wiper_code)] = wiper_code
 
-    OUT_BIN.parent.mkdir(parents=True, exist_ok=True)
-    OUT_BIN.write_bytes(data)
+    out_bin.parent.mkdir(parents=True, exist_ok=True)
+    out_bin.write_bytes(data)
 
-    print(f"Successfully generated: {OUT_BIN}")
+    print(f"Successfully generated: {out_bin}")
     print(f"Size: {len(data)} bytes")
-    print(f"Wiper hook installed at 0x08008DD2 ({len(WIPER_CODE)} bytes)")
+    print(f"Wiper hook installed at file offset 0x{offset:X} ({len(wiper_code)} bytes)")
 
 
 if __name__ == "__main__":
-    build()
+    parser = argparse.ArgumentParser(
+        description="Patch a bootloader binary with the external-flash wiper."
+    )
+    parser.add_argument("input", type=Path, help="source bootloader binary")
+    parser.add_argument("output", type=Path, help="path for the patched binary")
+    parser.add_argument(
+        "--offset",
+        type=lambda value: int(value, 0),
+        default=0x8DD2,
+        help="file offset for the wiper hook (default: 0x8DD2)",
+    )
+    parser.add_argument(
+        "--chip-erase-address",
+        type=lambda value: int(value, 0),
+        default=0x08007274,
+        help="chip erase function address; Thumb bit is added (default: 0x08007274)",
+    )
+    args = parser.parse_args()
+    build(args.input, args.output, args.offset, args.chip_erase_address)
